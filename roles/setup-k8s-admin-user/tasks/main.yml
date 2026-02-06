@@ -1,0 +1,96 @@
+---
+# This role creates k8s-admin user for s390x (IBM Z) systems only
+# Required for IBM Cloud VPC-VSI security compliance (effective Feb 23, 2026)
+# This role is skipped for ppc64le (Power) systems
+
+- name: Check if k8s-admin user already exists
+  command: id k8s-admin
+  register: user_exists
+  failed_when: false
+  changed_when: false
+  when: ansible_architecture == 's390x'
+
+- name: Create k8s-admin user if it doesn't exist
+  user:
+    name: k8s-admin
+    shell: /bin/bash
+    create_home: yes
+    state: present
+  become: yes
+  when:
+    - ansible_architecture == 's390x'
+    - user_exists.rc != 0
+
+- name: Add k8s-admin to sudo group (Debian/Ubuntu)
+  user:
+    name: k8s-admin
+    groups: sudo
+    append: yes
+  become: yes
+  when:
+    - ansible_architecture == 's390x'
+    - user_exists.rc != 0
+    - ansible_os_family == "Debian"
+  ignore_errors: yes
+
+- name: Add k8s-admin to wheel group (RHEL/CentOS/SLES)
+  user:
+    name: k8s-admin
+    groups: wheel
+    append: yes
+  become: yes
+  when:
+    - ansible_architecture == 's390x'
+    - user_exists.rc != 0
+    - ansible_os_family in ["RedHat", "Suse"]
+  ignore_errors: yes
+
+- name: Configure passwordless sudo for k8s-admin (required for Ansible automation)
+  shell: |
+    cat > /tmp/k8s-admin-sudoers << 'EOF'
+    # Passwordless sudo for k8s-admin user
+    # Required for Ansible automation - Ansible modules use Python internally
+    # Security: Access is still restricted by SSH key authentication
+    k8s-admin ALL=(ALL) NOPASSWD: ALL
+    EOF
+    sudo chmod 0440 /tmp/k8s-admin-sudoers
+    sudo visudo -cf /tmp/k8s-admin-sudoers && sudo mv /tmp/k8s-admin-sudoers /etc/sudoers.d/k8s-admin || rm -f /tmp/k8s-admin-sudoers
+  args:
+    creates: /etc/sudoers.d/k8s-admin
+  when:
+    - ansible_architecture == 's390x'
+
+- name: Create .ssh directory for k8s-admin
+  file:
+    path: /home/k8s-admin/.ssh
+    state: directory
+    owner: k8s-admin
+    group: k8s-admin
+    mode: '0700'
+  become: yes
+  when:
+    - ansible_architecture == 's390x'
+    - user_exists.rc != 0
+
+- name: Copy authorized_keys from root to k8s-admin
+  copy:
+    src: /root/.ssh/authorized_keys
+    dest: /home/k8s-admin/.ssh/authorized_keys
+    owner: k8s-admin
+    group: k8s-admin
+    mode: '0600'
+    remote_src: yes
+  become: yes
+  when:
+    - ansible_architecture == 's390x'
+    - user_exists.rc != 0
+
+- name: Display k8s-admin user status for s390x
+  debug:
+    msg: "{{ 'k8s-admin user already exists - skipping creation' if user_exists.rc == 0 else 'k8s-admin user created successfully' }}"
+  when: ansible_architecture == 's390x'
+
+- name: Display skip message for non-s390x architectures
+  debug:
+    msg: "Skipping k8s-admin user creation - not required for {{ ansible_architecture }} architecture"
+  when: ansible_architecture != 's390x'

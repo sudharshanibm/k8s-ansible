@@ -1,0 +1,319 @@
+- name: "Phase 1: Rolling containerd upgrade on worker nodes"
+  hosts: workers
+  serial: 1
+  become: true
+  vars:
+    containerd_target_version: "{{ containerd_version }}"
+    first_master: "{{ groups['masters'][0] }}"
+  tasks:
+    - name: Get current containerd version
+      command: containerd --version
+      register: current_version
+      changed_when: false
+
+    - name: Display current containerd version
+      debug:
+        msg: "Current: {{ current_version.stdout }} | Target: {{ containerd_target_version }}"
+
+    - name: Check if upgrade is needed
+      set_fact:
+        upgrade_needed: "{{ containerd_target_version not in current_version.stdout }}"
+
+    - name: Skip message if already at target version
+      debug:
+        msg: "Node {{ inventory_hostname }} is already running containerd {{ containerd_target_version }}, skipping."
+      when: not upgrade_needed
+
+    - name: Drain node ({{ ansible_hostname }})
+      command: >
+        kubectl drain {{ ansible_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --timeout=120s
+        --force
+        --disable-eviction
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      delegate_to: "{{ first_master }}"
+      when: upgrade_needed
+
+    - name: Stop containerd service
+      systemd:
+        name: containerd
+        state: stopped
+      when: upgrade_needed
+
+    - name: Backup current containerd config
+      copy:
+        src: /etc/containerd/config.toml
+        dest: /etc/containerd/config.toml.bak.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: yes
+      when: upgrade_needed
+
+    - name: Download and install containerd {{ containerd_target_version }}
+      unarchive:
+        src: "https://github.com/containerd/containerd/releases/download/v{{ containerd_target_version }}/containerd-{{ containerd_target_version }}-linux-{{ ansible_architecture }}.tar.gz"
+        dest: "/usr/local"
+        remote_src: yes
+      retries: 3
+      delay: 5
+      when: upgrade_needed
+
+    - name: Update containerd.service file
+      get_url:
+        url: "https://raw.githubusercontent.com/containerd/containerd/main/containerd.service"
+        dest: /usr/lib/systemd/system/containerd.service
+        mode: '0755'
+      when: upgrade_needed
+
+    - name: Regenerate /etc/containerd/config.toml from template
+      template:
+        src: roles/runtime/templates/containerd/config.toml.j2
+        dest: /etc/containerd/config.toml
+        mode: '0644'
+      when: upgrade_needed
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+      when: upgrade_needed
+
+    - name: Start and enable containerd
+      systemd:
+        name: containerd
+        state: started
+        enabled: yes
+      when: upgrade_needed
+
+    - name: Wait for containerd to be ready
+      command: crictl --runtime-endpoint unix:///run/containerd/containerd.sock version
+      register: crictl_check
+      retries: 10
+      delay: 5
+      until: crictl_check.rc == 0
+      changed_when: false
+      when: upgrade_needed
+
+    - name: Restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted
+      when: upgrade_needed
+
+    - name: Wait for kubelet to be ready
+      command: systemctl is-active kubelet
+      register: kubelet_status
+      retries: 10
+      delay: 5
+      until: kubelet_status.rc == 0
+      changed_when: false
+      when: upgrade_needed
+
+    - name: Uncordon node ({{ ansible_hostname }})
+      command: kubectl uncordon {{ ansible_hostname }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      delegate_to: "{{ first_master }}"
+      when: upgrade_needed
+
+    - name: Wait for node to become Ready ({{ ansible_hostname }})
+      command: >
+        kubectl get node {{ ansible_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      delegate_to: "{{ first_master }}"
+      register: node_ready
+      retries: 12
+      delay: 10
+      until: node_ready.stdout == "True"
+      changed_when: false
+      when: upgrade_needed
+
+    - name: Verify new containerd version
+      command: containerd --version
+      register: new_version
+      changed_when: false
+      when: upgrade_needed
+
+    - name: Display upgrade result
+      debug:
+        msg: " {{ inventory_hostname }} upgraded successfully: {{ new_version.stdout }}"
+      when: upgrade_needed
+
+- name: "Phase 2: Rolling containerd upgrade on control-plane nodes"
+  hosts: masters
+  serial: 1
+  become: true
+  vars:
+    containerd_target_version: "{{ containerd_version }}"
+  tasks:
+    - name: Get current containerd version
+      command: containerd --version
+      register: current_version
+      changed_when: false
+
+    - name: Display current containerd version
+      debug:
+        msg: "Current: {{ current_version.stdout }} | Target: {{ containerd_target_version }}"
+
+    - name: Check if upgrade is needed
+      set_fact:
+        upgrade_needed: "{{ containerd_target_version not in current_version.stdout }}"
+
+    - name: Skip message if already at target version
+      debug:
+        msg: "Node {{ inventory_hostname }} is already running containerd {{ containerd_target_version }}, skipping."
+      when: not upgrade_needed
+
+    - name: Drain control-plane node ({{ ansible_hostname }})
+      command: >
+        kubectl drain {{ ansible_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --timeout=120s
+        --force
+        --disable-eviction
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: upgrade_needed
+
+    - name: Stop containerd service
+      systemd:
+        name: containerd
+        state: stopped
+      when: upgrade_needed
+
+    - name: Backup current containerd config
+      copy:
+        src: /etc/containerd/config.toml
+        dest: /etc/containerd/config.toml.bak.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: yes
+      when: upgrade_needed
+
+    - name: Download and install containerd {{ containerd_target_version }}
+      unarchive:
+        src: "https://github.com/containerd/containerd/releases/download/v{{ containerd_target_version }}/containerd-{{ containerd_target_version }}-linux-{{ ansible_architecture }}.tar.gz"
+        dest: "/usr/local"
+        remote_src: yes
+      retries: 3
+      delay: 5
+      when: upgrade_needed
+
+    - name: Update containerd.service file
+      get_url:
+        url: "https://raw.githubusercontent.com/containerd/containerd/main/containerd.service"
+        dest: /usr/lib/systemd/system/containerd.service
+        mode: '0755'
+      when: upgrade_needed
+
+    - name: Regenerate /etc/containerd/config.toml from template
+      template:
+        src: roles/runtime/templates/containerd/config.toml.j2
+        dest: /etc/containerd/config.toml
+        mode: '0644'
+      when: upgrade_needed
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+      when: upgrade_needed
+
+    - name: Start and enable containerd
+      systemd:
+        name: containerd
+        state: started
+        enabled: yes
+      when: upgrade_needed
+
+    - name: Wait for containerd to be ready
+      command: crictl --runtime-endpoint unix:///run/containerd/containerd.sock version
+      register: crictl_check
+      retries: 10
+      delay: 5
+      until: crictl_check.rc == 0
+      changed_when: false
+      when: upgrade_needed
+
+    - name: Restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted
+      when: upgrade_needed
+
+    - name: Wait for kubelet to be ready
+      command: systemctl is-active kubelet
+      register: kubelet_status
+      retries: 10
+      delay: 5
+      until: kubelet_status.rc == 0
+      changed_when: false
+      when: upgrade_needed
+
+    - name: Uncordon control-plane node ({{ ansible_hostname }})
+      command: kubectl uncordon {{ ansible_hostname }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: upgrade_needed
+
+    - name: Wait for node to become Ready ({{ ansible_hostname }})
+      command: >
+        kubectl get node {{ ansible_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: node_ready
+      retries: 12
+      delay: 10
+      until: node_ready.stdout == "True"
+      changed_when: false
+      when: upgrade_needed
+
+    - name: Verify new containerd version
+      command: containerd --version
+      register: new_version
+      changed_when: false
+      when: upgrade_needed
+
+    - name: Display upgrade result
+      debug:
+        msg: " {{ inventory_hostname }} upgraded successfully: {{ new_version.stdout }}"
+      when: upgrade_needed
+
+- name: "Phase 3: Post-upgrade cluster verification"
+  hosts: masters[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Get all node statuses
+      command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: node_status
+      changed_when: false
+
+    - name: Display cluster status
+      debug:
+        msg: |
+          ====================================
+          Post-Upgrade Cluster Status
+          ====================================
+          {{ node_status.stdout }}
+          ====================================
+
+    - name: Check for non-running pods in kube-system
+      shell: kubectl get pods -n kube-system --no-headers | grep -v -E 'Running|Completed' || true
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: bad_pods
+      changed_when: false
+
+    - name: Display problematic pods (if any)
+      debug:
+        msg: |
+          Non-running kube-system pods:
+          {{ bad_pods.stdout | default('None - all pods healthy! ') }}
+      when: bad_pods.stdout | length > 0
+
+    - name: All kube-system pods healthy
+      debug:
+        msg: " All kube-system pods are Running/Completed"
+      when: bad_pods.stdout | length == 0

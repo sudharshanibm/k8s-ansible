@@ -1,3 +1,10 @@
+- name: Setup k8s-admin user for IBM Z systems
+  hosts: all
+  gather_facts: yes
+  roles:
+    - role: setup-k8s-admin-user
+      when: ansible_architecture == 's390x'
+
 - name: Setup Networking on the control-plane, compute and bastion nodes.
   hosts:
     - masters
@@ -11,13 +18,15 @@
   hosts:
     - masters
     - workers
+  become: true
   roles:
-    # - runtime
-    # - download-k8s
+    - runtime
+    - download-k8s
     - install-k8s
 
 - name: Install networking - calico
   hosts: masters
+  become: true
   roles:
     - role: install-calico
       when: cni_provider == "calico"
@@ -26,6 +35,7 @@
   hosts:
     - masters
     - workers
+  become: true
   roles:
     - role: install-flannel
       when: cni_provider == "flannel"

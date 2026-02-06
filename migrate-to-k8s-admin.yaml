@@ -1,0 +1,125 @@
+- name: "Phase 1: Create k8s-admin user on existing nodes"
+  hosts: all
+  gather_facts: yes
+  vars:
+    # Override ansible_user to root for this phase only.
+    # group_vars/all sets ansible_user to k8s-admin for s390x,
+    # but the user doesn't exist yet on existing nodes.
+    ansible_user: root
+  roles:
+    - role: setup-k8s-admin-user
+      when: ansible_architecture == 's390x'
+  post_tasks:
+    - name: Reset SSH connection so Phase 2 reconnects as k8s-admin
+      meta: reset_connection
+- name: "Phase 2: Validate k8s-admin SSH and sudo access"
+  hosts: all
+  gather_facts: no
+  vars:
+    ansible_user: k8s-admin
+  tasks:
+    - name: Gather facts as k8s-admin
+      setup:
+      vars:
+        ansible_become: false
+      when: ansible_architecture is not defined or ansible_architecture == 's390x'
+
+    - name: Validate SSH connectivity as k8s-admin (must NOT use become)
+      command: whoami
+      vars:
+        ansible_become: false
+      register: ssh_user
+      changed_when: false
+      when: ansible_architecture == 's390x'
+
+    - name: Validate sudo privilege escalation
+      command: whoami
+      vars:
+        ansible_become: true
+      register: sudo_user
+      changed_when: false
+      when: ansible_architecture == 's390x'
+
+    - name: Validate kubectl access on master nodes
+      command: kubectl get nodes --no-headers
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      vars:
+        ansible_become: true
+      register: kubectl_result
+      changed_when: false
+      when:
+        - ansible_architecture == 's390x'
+        - "'masters' in group_names"
+      ignore_errors: yes
+
+    - name: Display validation results
+      debug:
+        msg: |
+          === Migration Validation Results ===
+          SSH user (should be k8s-admin): {{ ssh_user.stdout | default('skipped') }}
+          Sudo user (should be root):    {{ sudo_user.stdout | default('skipped') }}
+          kubectl output:                {{ kubectl_result.stdout | default('skipped or not a master node') }}
+          ====================================
+      when: ansible_architecture == 's390x'
+
+    - name: Fail if SSH user is not k8s-admin
+      fail:
+        msg: "SSH validation failed. Expected user 'k8s-admin', got '{{ ssh_user.stdout }}'"
+      when:
+        - ansible_architecture == 's390x'
+        - ssh_user.stdout is defined
+        - ssh_user.stdout != 'k8s-admin'
+
+    - name: Fail if sudo is not working (become should give root)
+      fail:
+        msg: "Sudo validation failed. Expected 'root' from become, got '{{ sudo_user.stdout }}'"
+      when:
+        - ansible_architecture == 's390x'
+        - sudo_user.stdout is defined
+        - sudo_user.stdout != 'root'
+
+    - name: Migration validation passed
+      debug:
+        msg: >
+          All validations passed! k8s-admin user is functional with sudo access.
+          You can now safely use k8s-admin for all future Ansible runs.
+      when: ansible_architecture == 's390x'
+
+    - name: Skip message for non-s390x
+      debug:
+        msg: "Skipping validation - not required for {{ ansible_architecture }} architecture"
+      when: ansible_architecture != 's390x'
+- name: "Phase 3: Disable root SSH login (optional)"
+  hosts: all
+  gather_facts: yes
+  become: true
+  vars:
+    ansible_user: k8s-admin
+    disable_root_ssh: false
+  tasks:
+    - name: Disable root SSH login in sshd_config
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        state: present
+        backup: yes
+      when:
+        - ansible_architecture == 's390x'
+        - disable_root_ssh | bool
+      notify: Restart sshd
+
+    - name: Skip message when disable_root_ssh is false
+      debug:
+        msg: >
+          Root SSH disable skipped. To disable, re-run with: -e "disable_root_ssh=true"
+      when:
+        - ansible_architecture == 's390x'
+        - not (disable_root_ssh | bool)
+
+  handlers:
+    - name: Restart sshd
+      systemd:
+        name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+        state: restarted
