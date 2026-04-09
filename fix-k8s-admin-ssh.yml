@@ -1,0 +1,156 @@
+---
+# Emergency recovery playbook for k8s-admin SSH access issues
+# Use this when k8s-admin user exists but SSH keys are not working
+# Run with: ansible-playbook -v -i examples/k8s-build-cluster/hosts.yml fix-k8s-admin-ssh.yml
+
+- name: "Emergency Fix: Restore k8s-admin SSH access"
+  hosts: all
+  gather_facts: yes
+  vars:
+    ansible_user: root
+    ansible_become: false
+  tasks:
+    - name: Check current user
+      command: whoami
+      register: current_user
+      changed_when: false
+
+    - name: Display current connection info
+      debug:
+        msg: |
+          Connected to {{ inventory_hostname }} as {{ current_user.stdout }}
+          Architecture: {{ ansible_architecture }}
+
+    - name: Check if k8s-admin user exists
+      command: id k8s-admin
+      register: k8s_admin_exists
+      failed_when: false
+      changed_when: false
+      when: ansible_architecture == 's390x'
+
+    - name: Check root authorized_keys
+      stat:
+        path: /root/.ssh/authorized_keys
+      register: root_keys
+      when: ansible_architecture == 's390x'
+
+    - name: Display root SSH keys status
+      debug:
+        msg: |
+          Root authorized_keys: {{ 'exists (' + (root_keys.stat.size | string) + ' bytes)' if root_keys.stat.exists else 'MISSING!' }}
+      when: ansible_architecture == 's390x'
+
+    - name: Fail if root authorized_keys is missing
+      fail:
+        msg: |
+          CRITICAL: /root/.ssh/authorized_keys is missing or empty!
+          This means root SSH access is not properly configured.
+          Please check your SSH key configuration.
+      when:
+        - ansible_architecture == 's390x'
+        - not root_keys.stat.exists or root_keys.stat.size == 0
+
+    - name: Ensure k8s-admin .ssh directory exists
+      file:
+        path: /home/k8s-admin/.ssh
+        state: directory
+        owner: k8s-admin
+        group: k8s-admin
+        mode: '0700'
+      become: yes
+      when:
+        - ansible_architecture == 's390x'
+        - k8s_admin_exists.rc == 0
+
+    - name: Force copy authorized_keys from root to k8s-admin
+      copy:
+        src: /root/.ssh/authorized_keys
+        dest: /home/k8s-admin/.ssh/authorized_keys
+        owner: k8s-admin
+        group: k8s-admin
+        mode: '0600'
+        remote_src: yes
+        force: yes
+      become: yes
+      when:
+        - ansible_architecture == 's390x'
+        - k8s_admin_exists.rc == 0
+        - root_keys.stat.exists
+        - root_keys.stat.size > 0
+
+    - name: Verify k8s-admin authorized_keys
+      stat:
+        path: /home/k8s-admin/.ssh/authorized_keys
+      register: k8s_admin_keys
+      become: yes
+      when:
+        - ansible_architecture == 's390x'
+        - k8s_admin_exists.rc == 0
+
+    - name: Display k8s-admin SSH keys status
+      debug:
+        msg: |
+          k8s-admin authorized_keys: {{ 'exists (' + (k8s_admin_keys.stat.size | string) + ' bytes)' if k8s_admin_keys.stat.exists else 'MISSING!' }}
+      when:
+        - ansible_architecture == 's390x'
+        - k8s_admin_exists.rc == 0
+
+    - name: Verify k8s-admin sudo configuration
+      stat:
+        path: /etc/sudoers.d/k8s-admin
+      register: sudo_config
+      become: yes
+      when:
+        - ansible_architecture == 's390x'
+        - k8s_admin_exists.rc == 0
+
+    - name: Display sudo configuration status
+      debug:
+        msg: |
+          Sudo config: {{ 'exists' if sudo_config.stat.exists else 'MISSING!' }}
+      when:
+        - ansible_architecture == 's390x'
+        - k8s_admin_exists.rc == 0
+
+    - name: Success message
+      debug:
+        msg: |
+          ✓ SSH keys have been restored for k8s-admin user
+          ✓ You should now be able to connect as k8s-admin
+          
+          Test with: ssh -i /root/.ssh/k8s-test-env/id_rsa k8s-admin@{{ inventory_hostname }}
+      when:
+        - ansible_architecture == 's390x'
+        - k8s_admin_exists.rc == 0
+        - k8s_admin_keys.stat.exists
+        - k8s_admin_keys.stat.size > 0
+
+- name: "Verify k8s-admin SSH access"
+  hosts: all
+  gather_facts: no
+  vars:
+    ansible_user: k8s-admin
+  tasks:
+    - name: Test SSH connection as k8s-admin
+      ping:
+      when: ansible_architecture == 's390x'
+
+    - name: Test sudo access
+      command: whoami
+      become: yes
+      register: sudo_test
+      changed_when: false
+      when: ansible_architecture == 's390x'
+
+    - name: Display verification results
+      debug:
+        msg: |
+          ✓ SSH connection successful as k8s-admin
+          ✓ Sudo access working (running as {{ sudo_test.stdout }})
+          
+          You can now proceed with Kubernetes installation!
+      when:
+        - ansible_architecture == 's390x'
+        - sudo_test.stdout == 'root'
+
+# Made with Bob

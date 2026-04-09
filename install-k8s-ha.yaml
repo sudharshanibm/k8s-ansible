@@ -1,9 +1,46 @@
-- name: Setup k8s-admin user for IBM Z systems
+- name: Preflight access validation
   hosts: all
   gather_facts: yes
+  any_errors_fatal: true
+  tasks:
+    - name: Validate SSH connectivity
+      ping:
+      vars:
+        ansible_become: false
+
+    - name: Validate remote user
+      command: whoami
+      register: ssh_user
+      changed_when: false
+      vars:
+        ansible_become: false
+
+    - name: Validate sudo access
+      command: whoami
+      become: true
+      register: sudo_user
+      changed_when: false
+
+    - name: Ensure preprovisioned s390x hosts use k8s-admin
+      assert:
+        that:
+          - ssh_user.stdout == 'k8s-admin'
+          - sudo_user.stdout == 'root'
+        fail_msg: >-
+          Expected preprovisioned s390x access via k8s-admin with passwordless sudo.
+          Got ssh_user={{ ssh_user.stdout }} sudo_user={{ sudo_user.stdout }} on {{ inventory_hostname }}.
+          Fix bastion-to-node SSH before running the installer.
+      when: ansible_architecture == 's390x'
+
+- name: Optionally bootstrap k8s-admin user for IBM Z systems
+  hosts: all
+  gather_facts: yes
+  any_errors_fatal: true
   roles:
     - role: setup-k8s-admin-user
-      when: ansible_architecture == 's390x'
+      when:
+        - ansible_architecture == 's390x'
+        - bootstrap_k8s_admin_from_root | default(false) | bool
 
 - name: Setup Networking on the control-plane, compute and bastion nodes.
   hosts:

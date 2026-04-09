@@ -68,11 +68,30 @@
     group: k8s-admin
     mode: '0700'
   become: yes
+  when: ansible_architecture == 's390x'
+
+- name: Install explicit SSH authorized_keys for k8s-admin
+  authorized_key:
+    user: k8s-admin
+    key: "{{ item }}"
+    state: present
+    exclusive: false
+  loop: "{{ k8s_admin_authorized_keys | default([]) }}"
+  become: yes
   when:
     - ansible_architecture == 's390x'
-    - user_exists.rc != 0
+    - (k8s_admin_authorized_keys | default([])) | length > 0
 
-- name: Copy authorized_keys from root to k8s-admin
+- name: Check if root authorized_keys exists for optional bootstrap copy
+  stat:
+    path: /root/.ssh/authorized_keys
+  register: root_authorized_keys
+  become: yes
+  when:
+    - ansible_architecture == 's390x'
+    - bootstrap_k8s_admin_copy_root_keys | default(false) | bool
+
+- name: Copy authorized_keys from root to k8s-admin during explicit bootstrap
   copy:
     src: /root/.ssh/authorized_keys
     dest: /home/k8s-admin/.ssh/authorized_keys
@@ -80,10 +99,49 @@
     group: k8s-admin
     mode: '0600'
     remote_src: yes
+    force: yes
   become: yes
   when:
     - ansible_architecture == 's390x'
+    - bootstrap_k8s_admin_copy_root_keys | default(false) | bool
+    - root_authorized_keys.stat.exists
+    - root_authorized_keys.stat.size > 0
+
+- name: Fail if explicit bootstrap requested but root authorized_keys is missing or empty
+  fail:
+    msg: |
+      ERROR: /root/.ssh/authorized_keys is missing or empty!
+      Cannot copy SSH keys to k8s-admin user.
+      Provide k8s_admin_authorized_keys explicitly or fix the root key first.
+  when:
+    - ansible_architecture == 's390x'
+    - bootstrap_k8s_admin_copy_root_keys | default(false) | bool
+    - not root_authorized_keys.stat.exists or root_authorized_keys.stat.size == 0
+
+- name: Fail if no SSH key source is configured for k8s-admin bootstrap
+  fail:
+    msg: |
+      ERROR: No SSH key source configured for k8s-admin bootstrap.
+      Set k8s_admin_authorized_keys or bootstrap_k8s_admin_copy_root_keys=true.
+  when:
+    - ansible_architecture == 's390x'
     - user_exists.rc != 0
+    - (k8s_admin_authorized_keys | default([])) | length == 0
+    - not (bootstrap_k8s_admin_copy_root_keys | default(false) | bool)
+
+- name: Verify k8s-admin authorized_keys was created
+  stat:
+    path: /home/k8s-admin/.ssh/authorized_keys
+  register: k8s_admin_authorized_keys_stat
+  become: yes
+  when: ansible_architecture == 's390x'
+
+- name: Display authorized_keys status
+  debug:
+    msg: |
+      Root authorized_keys: {{ 'exists (' + (root_authorized_keys.stat.size | string) + ' bytes)' if (root_authorized_keys is defined and root_authorized_keys.stat.exists) else 'not used or missing' }}
+      k8s-admin authorized_keys: {{ 'exists (' + (k8s_admin_authorized_keys_stat.stat.size | string) + ' bytes)' if k8s_admin_authorized_keys_stat.stat.exists else 'missing' }}
+  when: ansible_architecture == 's390x'
 
 - name: Display k8s-admin user status for s390x
   debug:

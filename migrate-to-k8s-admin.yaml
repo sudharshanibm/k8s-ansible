@@ -2,19 +2,46 @@
   hosts: all
   gather_facts: yes
   vars:
-    # Override ansible_user to root for this phase only.
-    # group_vars/all sets ansible_user to k8s-admin for s390x,
-    # but the user doesn't exist yet on existing nodes.
-    ansible_user: root
+    # New s390x VSI resources already provision k8s-admin at create time.
+    # Set bootstrap_k8s_admin_from_root=true only for legacy environments that
+    # still require a root-based one-time bootstrap.
+    bootstrap_from_root: "{{ bootstrap_k8s_admin_from_root | default(false) | bool }}"
+    ansible_user: "{{ 'root' if bootstrap_from_root else 'k8s-admin' }}"
+    ansible_become: "{{ false if bootstrap_from_root else true }}"
+    ssh_public_key_path: "{{ ssh_key_path | default(ansible_ssh_private_key_file + '.pub') }}"
+    k8s_admin_authorized_keys:
+      - "{{ lookup('file', ssh_public_key_path) }}"
+  tasks:
+    - name: Display connection information
+      debug:
+        msg: |
+          Connecting to {{ inventory_hostname }} as {{ ansible_user }}
+          bootstrap_k8s_admin_from_root={{ bootstrap_from_root }}
+          Architecture will be detected to determine if k8s-admin setup is needed
+
   roles:
     - role: setup-k8s-admin-user
-      when: ansible_architecture == 's390x'
+      when:
+        - ansible_architecture == 's390x'
+        - bootstrap_from_root
+
   post_tasks:
+    - name: Display completion message for s390x
+      debug:
+        msg: |
+          ✓ k8s-admin bootstrap completed on {{ inventory_hostname }}
+          Next phase will validate SSH access with k8s-admin user
+      when:
+        - ansible_architecture == 's390x'
+        - bootstrap_from_root
+
     - name: Reset SSH connection so Phase 2 reconnects as k8s-admin
       meta: reset_connection
+      when: bootstrap_from_root
 - name: "Phase 2: Validate k8s-admin SSH and sudo access"
   hosts: all
   gather_facts: no
+  any_errors_fatal: true
   vars:
     ansible_user: k8s-admin
   tasks:

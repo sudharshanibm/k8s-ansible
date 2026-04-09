@@ -52,6 +52,7 @@
         state: stopped
         enabled: no
       when: ansible_pkg_mgr == 'apt'
+      ignore_errors: yes
 
     - name: Wait for APT lock to be released
       shell: |

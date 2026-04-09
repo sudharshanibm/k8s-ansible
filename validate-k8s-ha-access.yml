@@ -1,0 +1,39 @@
+- name: Validate bastion and node access for HA install
+  hosts: all
+  gather_facts: yes
+  any_errors_fatal: true
+  tasks:
+    - name: Validate SSH connectivity
+      ping:
+      vars:
+        ansible_become: false
+
+    - name: Validate remote login user
+      command: whoami
+      register: ssh_user
+      changed_when: false
+      vars:
+        ansible_become: false
+
+    - name: Validate sudo access
+      command: whoami
+      become: true
+      register: sudo_user
+      changed_when: false
+
+    - name: Ensure s390x hosts are reachable as k8s-admin
+      assert:
+        that:
+          - ssh_user.stdout == 'k8s-admin'
+          - sudo_user.stdout == 'root'
+        fail_msg: >-
+          Access validation failed on {{ inventory_hostname }}.
+          ssh_user={{ ssh_user.stdout }} sudo_user={{ sudo_user.stdout }}.
+          Fix bastion-to-node SSH before running install-k8s-ha.yaml.
+      when: ansible_architecture == 's390x'
+
+    - name: Show validation result
+      debug:
+        msg: >-
+          Access OK on {{ inventory_hostname }}:
+          ssh_user={{ ssh_user.stdout }} sudo_user={{ sudo_user.stdout }}
